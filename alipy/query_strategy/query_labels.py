@@ -1643,9 +1643,11 @@ class QueryInstanceLAL(BaseIndexQuery):
         self._mode = mode
         self._selector = None
         self.model = RandomForestClassifier(n_estimators=cls_est, oob_score=True, n_jobs=8)
-        if train_slt:
+        if train_slt == True:
             self.download_data()
             self.train_selector_from_file()
+        elif train_slt:
+            self.load_selector_from_file(train_slt)
 
     def download_data(self):
         iter_url = 'https://raw.githubusercontent.com/ksenia-konyushkova/LAL/master/lal%20datasets/LAL-iterativetree-simulatedunbalanced-big.npz'
@@ -1732,6 +1734,13 @@ class QueryInstanceLAL(BaseIndexQuery):
         print('Done!')
         print('Oob score = ', lalModel1.oob_score_)
         self._selector = lalModel1
+
+    def load_selector_from_file(self, file_path):
+        from joblib import dump, load
+        print("Load file")
+        lalModel1 = load(file_path)
+        self._selector = lalModel1
+        print("Done!")
 
     def select(self, label_index, unlabel_index, batch_size=1, **kwargs):
         if self._selector is None:
