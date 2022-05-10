@@ -1209,6 +1209,18 @@ class QueryInstanceBMDR(BaseIndexQuery):
             # The optimal objective value is returned by `prob.solve()`.
             # print(prob.is_qp())
             try:
+                prob_is_qp = prob.is_qp()
+                assert prob_is_qp == True
+            except:
+                P_is_psd = np.all(np.linalg.eigvals(P) > 0)
+                if P_is_psd == True:
+                    P = cvxpy.atoms.affine.wraps.psd_wrap(P)
+                    objective = cvxpy.Minimize(0.5 * cvxpy.quad_form(x, P) + q.T @ x)
+                    prob = cvxpy.Problem(objective, constraints)
+                else:
+                    assert False, "P is not psd matrix!"
+
+            try:
                 result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS)
             except cvxpy.error.DCPError:
                 # cvx
@@ -1485,6 +1497,18 @@ class QueryInstanceSPAL(BaseIndexQuery):
             prob = cvxpy.Problem(objective, constraints)
             # The optimal objective value is returned by `prob.solve()`.
             # result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS)
+            try:
+                prob_is_qp = prob.is_qp()
+                assert prob_is_qp == True
+            except:
+                P_is_psd = np.all(np.linalg.eigvals(P) > 0)
+                if P_is_psd == True:
+                    P = cvxpy.atoms.affine.wraps.psd_wrap(P)
+                    objective = cvxpy.Minimize(0.5 * cvxpy.quad_form(x, P) + q.T @ x)
+                    prob = cvxpy.Problem(objective, constraints)
+                else:
+                    assert False, "P is not psd matrix!"
+
             try:
                 result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS)
             except cvxpy.error.DCPError:
