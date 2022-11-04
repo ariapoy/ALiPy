@@ -1016,7 +1016,69 @@ class QueryInstanceGraphDensity(BaseIndexQuery):
         output['graph_density'] = self.starting_density
         return output
 
+def cd_solve_one(P, q, x, i, j):
+    x_i, x_j = x[i], x[j]
+    q_i, q_j = q[i], q[j]
+    P_ii, P_ij, P_ji, P_jj = P[i,i], P[i,j], P[j,i], P[j,j]
+    b = P_ii*x_i + 0.5*(P_ij + P_ji)*(x_j-x_i) - x_j*P_jj + q_i - q_j
+    a = 0.5*(P_ii - P_ij - P_ji + P_jj)
+    
+    eps = 1e-16
+    min_pt = -b/(2*a+eps)
+    #eps = 1e-20
+    eps = 0
+    if min_pt > eps:
+        if min_pt < x_j:
+            d = min_pt
+        else:
+            d = x_j
+    elif min_pt < eps:
+        if min_pt > -x_i:
+            d = min_pt
+        else:
+            d = -x_i
+    else:
+        d = 0
 
+    return d
+    
+def cd_solve(P, q):
+    u = P.shape[0]
+    x = np.ones(u)/u
+    candidate = list(range(u))
+    #x = np.random.normal(size=u)
+    #x = np.exp(x)/np.sum(np.exp(x))
+
+    old_obj = np.sum( (0.5*np.dot(x, P) + q) * x )
+    cnt = 0
+    while 1:
+        
+        for _ in range(10):
+            idx = np.array(candidate)
+            np.random.shuffle(idx)
+            for k in range(int(len(candidate)/2)):
+                i, j = min(idx[2*k], idx[2*k+1]), max(idx[2*k], idx[2*k+1])
+                d = cd_solve_one(P, q, x, i, j)
+                x[i], x[j] = x[i] + d, x[j] - d
+                if x[j] <= 1e-16:
+                    candidate.remove(j)
+                    
+                    
+                if x[i] <= 1e-16:
+                    candidate.remove(i)
+                    
+        obj = np.sum( (0.5*np.dot(x, P) + q) * x )
+        if old_obj - obj < 1e-20:
+            #cnt += 1
+            break
+        old_obj = obj
+        #if cnt > 5:
+        #    break
+        #if cnt == int(u/2):
+        #    break
+
+    return x
+    
 class QueryInstanceBMDR(BaseIndexQuery):
     """Discriminative and Representative Queries for Batch Mode Active Learning (BMDR)
     will query a batch of informative and representative examples by minimizing the ERM risk bound
@@ -1138,7 +1200,7 @@ class QueryInstanceBMDR(BaseIndexQuery):
         import cvxpy
         self._cvxpy = cvxpy
 
-    def select(self, label_index, unlabel_index, batch_size=5, qp_solver='ECOS', **kwargs):
+    def select(self, label_index, unlabel_index, batch_size=5, qp_solver='OSQP', **kwargs):
         """Select indexes from the unlabel_index for querying.
 
         Parameters
@@ -1191,66 +1253,101 @@ class QueryInstanceBMDR(BaseIndexQuery):
         # start optimization
         last_round_selected = []
         iter_round = 0
-        while 1:
+        while 1:         
             iter_round += 1
             # solve QP
             P = 0.5 * self._beta * KUU
+            # P = 0.5 * KUU
             pred_of_unlab = tau.dot(KLU)
             a = pred_of_unlab * pred_of_unlab + 2 * np.abs(pred_of_unlab)
             q = self._beta * (
                     (U_len - batch_size) / N * np.ones(L_len).dot(KLU) - (L_len + batch_size) / N * np.ones(U_len).dot(
                 KUU)) + a
 
+            import time
+            start_time = time.time()
+
+            eps = 0.01*np.eye(P.shape[0])
+            # print(np.min(np.linalg.eigvals(P)))
+            # print(np.sum(P))
+            # P = P + eps
+            # print(np.min(np.linalg.eigvals(P)))
+            # print(np.sum(P))
+            will_x = cd_solve(P, q)
+            
+            # print("Will --- %s seconds ---" % (time.time() - start_time))
+            
             # cvx
-            x = cvxpy.Variable(U_len)
-            objective = cvxpy.Minimize(0.5 * cvxpy.quad_form(x, P) + q.T @ x)
-            constraints = [0 <= x, x <= 1, sum(x) == batch_size]
-            prob = cvxpy.Problem(objective, constraints)
+            # x = cvxpy.Variable(U_len)
+            # objective = cvxpy.Minimize(0.5 * cvxpy.quad_form(x, P) + q.T @ x)
+            # constraints = [0 <= x, x <= 1, sum(x) == batch_size]
+            # prob = cvxpy.Problem(objective, constraints)
             # The optimal objective value is returned by `prob.solve()`.
             # print(prob.is_qp())
-            try:
-                prob_is_qp = prob.is_qp()
-                assert prob_is_qp == True
-            except:
-                P_is_psd = np.all(np.linalg.eigvals(P) > 0)
-                if P_is_psd == True:
-                    P = cvxpy.atoms.affine.wraps.psd_wrap(P)
-                    objective = cvxpy.Minimize(0.5 * cvxpy.quad_form(x, P) + q.T @ x)
-                    prob = cvxpy.Problem(objective, constraints)
-                else:
-                    assert False, "P is not psd matrix!"
+            # try:
+            #     prob_is_qp = prob.is_qp()
+            #     assert prob_is_qp == True
+            # except:
+            # P_is_psd = np.all(np.linalg.eigvals(P) > 0)
+            # P_is_psd_eps = np.all(np.linalg.eigvals(P+eps) > 0)
+            # start_time = time.time()
+            # if P_is_psd == True:
+            #     P_ = cvxpy.atoms.affine.wraps.psd_wrap(P)
+            #     # print(np.sum(P_))
+            #     objective = cvxpy.Minimize(0.5 * cvxpy.quad_form(x, P_) + q.T @ x)
+            #     prob = cvxpy.Problem(objective, constraints)
+            # elif P_is_psd_eps == True:
+            #     P_ = cvxpy.atoms.affine.wraps.psd_wrap(P)
+            #     objective = cvxpy.Minimize(0.5 * cvxpy.quad_form(x, P_) + q.T @ x)
+            #     prob = cvxpy.Problem(objective, constraints)
+            # else:
+            #     assert False, "P is not psd matrix!"
 
-            try:
-                result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS)
-            except cvxpy.error.DCPError:
-                # cvx
-                x = cvxpy.Variable(U_len)
-                objective = cvxpy.Minimize(0.5 * cvxpy.quad_form(x, P) + q.T @ x)
-                constraints = [0 <= x, x <= 1]
-                prob = cvxpy.Problem(objective, constraints)
-                # The optimal objective value is returned by `prob.solve()`.
-                try:
-                    result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS)
-                except cvxpy.error.DCPError:
-                    result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS, gp=True)
+            # try:
+            # result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS, eps=1e-16)
+#             result = prob.solve(solver=cvxpy.OSQP)
+#             print("CVXPy --- %s seconds ---" % (time.time() - start_time))
+
+#             obj = np.sum( (0.5*np.dot(result_, P) + q) * result_ )
+#             cvx_x = np.array(x.value)
+#             #cvx_x = cvx_x/np.sqrt(np.sum(cvx_x**2))
+#             obj_cvx = np.sum( (0.5*np.dot(cvx_x, P) + q) *  cvx_x) 
+#             print(np.sum((result_ - cvx_x)**2), result_[:5], cvx_x[:5])
+#             print(np.sum(cvx_x))
+#             print("will obj = {}".format(obj), f'CVXPy (will) obj = {obj_cvx}', f'CVXPy obj = {result}')
+#             print()
+#             breakpoint()
+
+            # except cvxpy.error.DCPError:
+            #     # cvx
+            #     x = cvxpy.Variable(U_len)
+            #     objective = cvxpy.Minimize(0.5 * cvxpy.quad_form(x, P) + q.T @ x)
+            #     constraints = [0 <= x, x <= 1]
+            #     prob = cvxpy.Problem(objective, constraints)
+            #     # The optimal objective value is returned by `prob.solve()`.
+            #     try:
+            #         result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS)
+            #     except cvxpy.error.DCPError:
+            #         result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS, gp=True)
 
             # Sometimes the constraints can not be satisfied,
             # thus we relax the constraints to get an approximate solution.
-            if not (type(result) == float and result != float('inf') and result != float('-inf')):
-                # cvx
-                x = cvxpy.Variable(U_len)
-                objective = cvxpy.Minimize(0.5 * cvxpy.quad_form(x, P) + q.T @ x)
-                constraints = [0 <= x, x <= 1]
-                prob = cvxpy.Problem(objective, constraints)
-                # The optimal objective value is returned by `prob.solve()`.
-                try:
-                    result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS)
-                except cvxpy.error.DCPError:
-                    result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS, gp=True)
+            # if not (type(result) == float and result != float('inf') and result != float('-inf')):
+            #     # cvx
+            #     x = cvxpy.Variable(U_len)
+            #     objective = cvxpy.Minimize(0.5 * cvxpy.quad_form(x, P) + q.T @ x)
+            #     constraints = [0 <= x, x <= 1]
+            #     prob = cvxpy.Problem(objective, constraints)
+            #     # The optimal objective value is returned by `prob.solve()`.
+            #     try:
+            #         result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS)
+            #     except cvxpy.error.DCPError:
+            #         result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS, gp=True)
 
             # The optimal value for x is stored in `x.value`.
             # print(x.value)
-            dr_weight = np.array(x.value)
+            # dr_weight = np.array(x.value)
+            dr_weight = will_x
             if len(np.shape(dr_weight)) == 2:
                 dr_weight = dr_weight.T[0]
             # end cvx
