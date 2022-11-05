@@ -1022,6 +1022,8 @@ def cd_solve_one(P, q, x, i, j):
     P_ii, P_ij, P_ji, P_jj = P[i,i], P[i,j], P[j,i], P[j,j]
     b = P_ii*x_i + 0.5*(P_ij + P_ji)*(x_j-x_i) - x_j*P_jj + q_i - q_j
     a = 0.5*(P_ii - P_ij - P_ji + P_jj)
+    if a < 0:
+        return 0
     
     eps = 1e-16
     min_pt = -b/(2*a+eps)
@@ -1046,33 +1048,36 @@ def cd_solve(P, q):
     u = P.shape[0]
     x = np.ones(u)/u
     candidate = list(range(u))
+    np.random.seed(316)
     #x = np.random.normal(size=u)
     #x = np.exp(x)/np.sum(np.exp(x))
 
     old_obj = np.sum( (0.5*np.dot(x, P) + q) * x )
     cnt = 0
+    # print(f'old_obj: {old_obj}')
     while 1:
         
-        for _ in range(10):
+        for _ in range(100):
             idx = np.array(candidate)
             np.random.shuffle(idx)
             for k in range(int(len(candidate)/2)):
-                i, j = min(idx[2*k], idx[2*k+1]), max(idx[2*k], idx[2*k+1])
+                i, j = sorted([idx[2*k], idx[2*k+1]])
+                
+                
                 d = cd_solve_one(P, q, x, i, j)
                 x[i], x[j] = x[i] + d, x[j] - d
                 if x[j] <= 1e-16:
                     candidate.remove(j)
-                    
-                    
                 if x[i] <= 1e-16:
                     candidate.remove(i)
-                    
+                          
         obj = np.sum( (0.5*np.dot(x, P) + q) * x )
-        if old_obj - obj < 1e-20:
+        if old_obj <= obj :
             #cnt += 1
             break
         old_obj = obj
-        #if cnt > 5:
+        
+        #if cnt > 10:
         #    break
         #if cnt == int(u/2):
         #    break
@@ -1256,8 +1261,10 @@ class QueryInstanceBMDR(BaseIndexQuery):
         while 1:         
             iter_round += 1
             # solve QP
-            P = 0.5 * self._beta * KUU
-            # P = 0.5 * KUU
+            eps = 1e-8*np.eye(KUU.shape[0])            
+            # P = 0.5 * self._beta * KUU
+            # P = 0.5 * self._beta * (KUU+eps)
+            P = 0.5 * 10 * KUU
             pred_of_unlab = tau.dot(KLU)
             a = pred_of_unlab * pred_of_unlab + 2 * np.abs(pred_of_unlab)
             q = self._beta * (
@@ -1267,7 +1274,6 @@ class QueryInstanceBMDR(BaseIndexQuery):
             import time
             start_time = time.time()
 
-            eps = 0.01*np.eye(P.shape[0])
             # print(np.min(np.linalg.eigvals(P)))
             # print(np.sum(P))
             # P = P + eps
@@ -1275,7 +1281,7 @@ class QueryInstanceBMDR(BaseIndexQuery):
             # print(np.sum(P))
             will_x = cd_solve(P, q)
             
-            # print("Will --- %s seconds ---" % (time.time() - start_time))
+            print("Will --- %s seconds ---" % (time.time() - start_time))
             
             # cvx
             # x = cvxpy.Variable(U_len)
@@ -1292,10 +1298,10 @@ class QueryInstanceBMDR(BaseIndexQuery):
             # P_is_psd_eps = np.all(np.linalg.eigvals(P+eps) > 0)
             # start_time = time.time()
             # if P_is_psd == True:
-            #     P_ = cvxpy.atoms.affine.wraps.psd_wrap(P)
+            # P_ = cvxpy.atoms.affine.wraps.psd_wrap(P)
             #     # print(np.sum(P_))
-            #     objective = cvxpy.Minimize(0.5 * cvxpy.quad_form(x, P_) + q.T @ x)
-            #     prob = cvxpy.Problem(objective, constraints)
+            # objective = cvxpy.Minimize(0.5 * cvxpy.quad_form(x, P_) + q.T @ x)
+            # prob = cvxpy.Problem(objective, constraints)
             # elif P_is_psd_eps == True:
             #     P_ = cvxpy.atoms.affine.wraps.psd_wrap(P)
             #     objective = cvxpy.Minimize(0.5 * cvxpy.quad_form(x, P_) + q.T @ x)
@@ -1304,19 +1310,20 @@ class QueryInstanceBMDR(BaseIndexQuery):
             #     assert False, "P is not psd matrix!"
 
             # try:
-            # result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS, eps=1e-16)
+            # start_time = time.time()
+            # result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS)
 #             result = prob.solve(solver=cvxpy.OSQP)
-#             print("CVXPy --- %s seconds ---" % (time.time() - start_time))
+            # print("CVXPy --- %s seconds ---" % (time.time() - start_time))
 
-#             obj = np.sum( (0.5*np.dot(result_, P) + q) * result_ )
-#             cvx_x = np.array(x.value)
+            # obj = np.sum( (0.5*np.dot(will_x, P) + q) * will_x )
+            # cvx_x = np.array(x.value)
 #             #cvx_x = cvx_x/np.sqrt(np.sum(cvx_x**2))
-#             obj_cvx = np.sum( (0.5*np.dot(cvx_x, P) + q) *  cvx_x) 
-#             print(np.sum((result_ - cvx_x)**2), result_[:5], cvx_x[:5])
+            # obj_cvx = np.sum( (0.5*np.dot(cvx_x, P) + q) *  cvx_x) 
+            # print(np.sum((will_x - cvx_x)**2))
 #             print(np.sum(cvx_x))
-#             print("will obj = {}".format(obj), f'CVXPy (will) obj = {obj_cvx}', f'CVXPy obj = {result}')
+            # print("will obj = {}".format(obj), f'cvxpy obj = {obj_cvx}')
 #             print()
-#             breakpoint()
+            # breakpoint()
 
             # except cvxpy.error.DCPError:
             #     # cvx
