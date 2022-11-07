@@ -1016,129 +1016,11 @@ class QueryInstanceGraphDensity(BaseIndexQuery):
         output['graph_density'] = self.starting_density
         return output
 
-def cd_solve_one(P, q, x, i, j):
-    x_i, x_j = x[i], x[j]
-    q_i, q_j = q[i], q[j]
-    P_ii, P_ij, P_ji, P_jj = P[i,i], P[i,j], P[j,i], P[j,j]
-    b = P_ii*x_i + 0.5*(P_ij + P_ji)*(x_j-x_i) - x_j*P_jj + q_i - q_j
-    a = 0.5*(P_ii - P_ij - P_ji + P_jj)
-    if a < 0:
-        return 0
-    
-    eps = 1e-16
-    min_pt = -b/(2*a+eps)
-    #eps = 1e-20
-    eps = 0
-    if min_pt > eps:
-        if min_pt < x_j:
-            d = min_pt
-        else:
-            d = x_j
-    elif min_pt < eps:
-        if min_pt > -x_i:
-            d = min_pt
-        else:
-            d = -x_i
-    else:
-        d = 0
-
-    return d
-    
-def cd_solve(P, q):
-    u = P.shape[0]
-    x = np.ones(u)/u
-    candidate = list(range(u))
-    np.random.seed(316)
-    #x = np.random.normal(size=u)
-    #x = np.exp(x)/np.sum(np.exp(x))
-
-    old_obj = np.sum( (0.5*np.dot(x, P) + q) * x )
-    cnt = 0
-    # print(f'old_obj: {old_obj}')
-    while 1:
-        
-        for _ in range(100):
-            idx = np.array(candidate)
-            np.random.shuffle(idx)
-            for k in range(int(len(candidate)/2)):
-                i, j = sorted([idx[2*k], idx[2*k+1]])
-                
-                
-                d = cd_solve_one(P, q, x, i, j)
-                x[i], x[j] = x[i] + d, x[j] - d
-                if x[j] <= 1e-16:
-                    candidate.remove(j)
-                if x[i] <= 1e-16:
-                    candidate.remove(i)
-                          
-        obj = np.sum( (0.5*np.dot(x, P) + q) * x )
-        if old_obj <= obj :
-            #cnt += 1
-            break
-        old_obj = obj
-        
-        #if cnt > 10:
-        #    break
-        #if cnt == int(u/2):
-        #    break
-
-    return x
-    
+from .cd_solve import cd_solve, obj_fcn
 class QueryInstanceBMDR(BaseIndexQuery):
-    """Discriminative and Representative Queries for Batch Mode Active Learning (BMDR)
-    will query a batch of informative and representative examples by minimizing the ERM risk bound
-    of active learning.
-
-    This method needs to solve a quadratic programming problem for multiple times at one query which
-    is time consuming in the relative large dataset (e.g., more than thousands of unlabeled examples).
-    Note that, the solving speed is also influenced by kernel function. In our testing, the gaussian
-    kernel takes more time to solve the problem.
-    The QP solver is cvxpy here.
-
-    The model used for instances selection is a linear regression model with the kernel form.
-
-    Parameters
-    ----------
-    X: 2D array, optional (default=None)
-        Feature matrix of the whole dataset. It is a reference which will not use additional memory.
-
-    y: array-like, optional (default=None)
-        Label matrix of the whole dataset. It is a reference which will not use additional memory.
-
-    beta: float, optional (default=1000)
-        The MMD parameter.
-
-    gamma: float, optional (default=0.1)
-        The l2-norm regularizer parameter.
-
-    rho: float, optional (default=1)
-        The parameter used in ADMM.
-
-    kernel : {'linear', 'poly', 'rbf', callable}, optional (default='rbf')
-        Specifies the kernel type to be used in the algorithm.
-        It must be one of 'linear', 'poly', 'rbf', or a callable.
-        If a callable is given it is used to pre-compute the kernel matrix
-        from data matrices; that matrix should be an array of shape
-        ``(n_samples, n_samples)``.
-
-    degree : int, optional (default=3)
-        Degree of the polynomial kernel function ('poly').
-        Ignored by all other kernels.
-
-    gamma_ker : float, optional (default=1.)
-        Kernel coefficient for 'rbf', 'poly'.
-
-    coef0 : float, optional (default=1.)
-        Independent term in kernel function.
-        It is only significant in 'poly'.
-
-    References
-    ----------
-    [1] Wang, Z., and Ye, J. 2013. Querying discriminative and
-        representative samples for batch mode active learning. In The
-        19th ACM SIGKDD International Conference on Knowledge
-        Discovery and Data Mining, 158-166.
-    """
+    '''
+    Will implementation of numerical coordinate descent
+    '''
 
     def __init__(self, X, y, beta=1000, gamma=0.1, rho=1, **kwargs):
         try:
@@ -1205,7 +1087,7 @@ class QueryInstanceBMDR(BaseIndexQuery):
         import cvxpy
         self._cvxpy = cvxpy
 
-    def select(self, label_index, unlabel_index, batch_size=5, qp_solver='OSQP', **kwargs):
+    def select(self, label_index, unlabel_index, batch_size=5, qp_solver='ECOS', **kwargs):
         """Select indexes from the unlabel_index for querying.
 
         Parameters
@@ -1258,103 +1140,24 @@ class QueryInstanceBMDR(BaseIndexQuery):
         # start optimization
         last_round_selected = []
         iter_round = 0
-        while 1:         
+        while 1:
             iter_round += 1
             # solve QP
-            eps = 1e-8*np.eye(KUU.shape[0])            
-            # P = 0.5 * self._beta * KUU
-            # P = 0.5 * self._beta * (KUU+eps)
-            P = 0.5 * 10 * KUU
+            P = 0.5 * self._beta * KUU
             pred_of_unlab = tau.dot(KLU)
             a = pred_of_unlab * pred_of_unlab + 2 * np.abs(pred_of_unlab)
             q = self._beta * (
                     (U_len - batch_size) / N * np.ones(L_len).dot(KLU) - (L_len + batch_size) / N * np.ones(U_len).dot(
                 KUU)) + a
 
-            import time
-            start_time = time.time()
-
-            # print(np.min(np.linalg.eigvals(P)))
-            # print(np.sum(P))
-            # P = P + eps
-            # print(np.min(np.linalg.eigvals(P)))
-            # print(np.sum(P))
-            will_x = cd_solve(P, q)
-            
-            print("Will --- %s seconds ---" % (time.time() - start_time))
-            
-            # cvx
-            # x = cvxpy.Variable(U_len)
-            # objective = cvxpy.Minimize(0.5 * cvxpy.quad_form(x, P) + q.T @ x)
-            # constraints = [0 <= x, x <= 1, sum(x) == batch_size]
-            # prob = cvxpy.Problem(objective, constraints)
-            # The optimal objective value is returned by `prob.solve()`.
-            # print(prob.is_qp())
-            # try:
-            #     prob_is_qp = prob.is_qp()
-            #     assert prob_is_qp == True
-            # except:
-            # P_is_psd = np.all(np.linalg.eigvals(P) > 0)
-            # P_is_psd_eps = np.all(np.linalg.eigvals(P+eps) > 0)
-            # start_time = time.time()
-            # if P_is_psd == True:
-            # P_ = cvxpy.atoms.affine.wraps.psd_wrap(P)
-            #     # print(np.sum(P_))
-            # objective = cvxpy.Minimize(0.5 * cvxpy.quad_form(x, P_) + q.T @ x)
-            # prob = cvxpy.Problem(objective, constraints)
-            # elif P_is_psd_eps == True:
-            #     P_ = cvxpy.atoms.affine.wraps.psd_wrap(P)
-            #     objective = cvxpy.Minimize(0.5 * cvxpy.quad_form(x, P_) + q.T @ x)
-            #     prob = cvxpy.Problem(objective, constraints)
-            # else:
-            #     assert False, "P is not psd matrix!"
-
-            # try:
-            # start_time = time.time()
-            # result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS)
-#             result = prob.solve(solver=cvxpy.OSQP)
-            # print("CVXPy --- %s seconds ---" % (time.time() - start_time))
-
-            # obj = np.sum( (0.5*np.dot(will_x, P) + q) * will_x )
-            # cvx_x = np.array(x.value)
-#             #cvx_x = cvx_x/np.sqrt(np.sum(cvx_x**2))
-            # obj_cvx = np.sum( (0.5*np.dot(cvx_x, P) + q) *  cvx_x) 
-            # print(np.sum((will_x - cvx_x)**2))
-#             print(np.sum(cvx_x))
-            # print("will obj = {}".format(obj), f'cvxpy obj = {obj_cvx}')
-#             print()
-            # breakpoint()
-
-            # except cvxpy.error.DCPError:
-            #     # cvx
-            #     x = cvxpy.Variable(U_len)
-            #     objective = cvxpy.Minimize(0.5 * cvxpy.quad_form(x, P) + q.T @ x)
-            #     constraints = [0 <= x, x <= 1]
-            #     prob = cvxpy.Problem(objective, constraints)
-            #     # The optimal objective value is returned by `prob.solve()`.
-            #     try:
-            #         result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS)
-            #     except cvxpy.error.DCPError:
-            #         result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS, gp=True)
-
-            # Sometimes the constraints can not be satisfied,
-            # thus we relax the constraints to get an approximate solution.
-            # if not (type(result) == float and result != float('inf') and result != float('-inf')):
-            #     # cvx
-            #     x = cvxpy.Variable(U_len)
-            #     objective = cvxpy.Minimize(0.5 * cvxpy.quad_form(x, P) + q.T @ x)
-            #     constraints = [0 <= x, x <= 1]
-            #     prob = cvxpy.Problem(objective, constraints)
-            #     # The optimal objective value is returned by `prob.solve()`.
-            #     try:
-            #         result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS)
-            #     except cvxpy.error.DCPError:
-            #         result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS, gp=True)
+            # Numerical coordinate descent solver
+            x_ans = cd_solve(P, q)
+            # obj_ans = obj_fcn(P, q, x_ans)
+            # End of numerical coordinate descent solver
 
             # The optimal value for x is stored in `x.value`.
             # print(x.value)
-            # dr_weight = np.array(x.value)
-            dr_weight = will_x
+            dr_weight = x_ans
             if len(np.shape(dr_weight)) == 2:
                 dr_weight = dr_weight.T[0]
             # end cvx
@@ -1399,6 +1202,495 @@ class QueryInstanceBMDR(BaseIndexQuery):
                 eps_dual = np.sqrt(batch_size) * ABSTOL + RELTOL * np.linalg.norm(delta)
                 if r_norm < eps_pri and s_norm < eps_dual:
                     break
+
+# from cvxpy.atoms.affine.wraps import psd_wrap
+# class QueryInstanceBMDR_psd_wrap(BaseIndexQuery):
+#     '''
+#     psd_wrap: https://github.com/cvxpy/cvxpy/issues/1097
+#     '''
+
+#     def __init__(self, X, y, beta=1000, gamma=0.1, rho=1, **kwargs):
+#         try:
+#             import cvxpy
+#             self._cvxpy = cvxpy
+#         except:
+#             raise ImportError("This method need cvxpy to solve the QP problem."
+#                               "Please refer to https://www.cvxpy.org/install/index.html "
+#                               "install cvxpy manually before using.")
+
+#         # K: kernel matrix
+#         super(QueryInstanceBMDR, self).__init__(X, y)
+#         self.y = np.asarray(copy.deepcopy(y))   # fix # 33, avoid influencing the original y
+#         ul = unique_labels(self.y)
+#         if len(ul) != 2:
+#             raise ValueError(f"This query strategy is implemented for binary classification only, "
+#                              f"but {len(ul)} classes are detected.")
+#         if len(ul) == 2 and {1, -1} != set(ul):
+#             y_temp = np.array(copy.deepcopy(self.y))
+#             self.y[y_temp == ul[0]] = 1
+#             self.y[y_temp == ul[1]] = -1
+
+#         self._beta = beta
+#         self._gamma = gamma
+#         self._rho = rho
+
+#         # calc kernel
+#         self._kernel = kwargs.pop('kernel', 'rbf')
+#         if self._kernel == 'rbf':
+#             self._K = rbf_kernel(X=X, Y=X, gamma=kwargs.pop('gamma_ker', 1.))
+#         elif self._kernel == 'poly':
+#             self._K = polynomial_kernel(X=X,
+#                                         Y=X,
+#                                         coef0=kwargs.pop('coef0', 1),
+#                                         degree=kwargs.pop('degree', 3),
+#                                         gamma=kwargs.pop('gamma_ker', 1.))
+#         elif self._kernel == 'linear':
+#             self._K = linear_kernel(X=X, Y=X)
+#         elif hasattr(self._kernel, '__call__'):
+#             self._K = self._kernel(X=np.array(X), Y=np.array(X))
+#         else:
+#             raise NotImplementedError
+
+#         if not isinstance(self._K, np.ndarray):
+#             raise TypeError('K should be an ndarray')
+#         if self._K.shape != (len(X), len(X)):
+#             raise ValueError(
+#                 'kernel should have size (%d, %d)' % (len(X), len(X)))
+
+#     def __getstate__(self):
+#         pickle_seq = (
+#             self.X,
+#             self.y,
+#             self._beta,
+#             self._gamma,
+#             self._rho,
+#             self._kernel,
+#             self._K
+#         )
+#         return pickle_seq
+
+#     def __setstate__(self, state):
+#         self.X, self.y, self._beta, self._gamma, self._rho, self._kernel, self._K = state
+#         import cvxpy
+#         self._cvxpy = cvxpy
+
+#     def select(self, label_index, unlabel_index, batch_size=5, qp_solver='ECOS', **kwargs):
+#         """Select indexes from the unlabel_index for querying.
+
+#         Parameters
+#         ----------
+#         label_index: {list, np.ndarray, IndexCollection}
+#             The indexes of labeled samples.
+
+#         unlabel_index: {list, np.ndarray, IndexCollection}
+#             The indexes of unlabeled samples.
+
+#         batch_size: int, optional (default=1)
+#             Selection batch size.
+
+#         qp_solver: str, optional (default='ECOS')
+#             The solver in cvxpy to solve QP, must be one of
+#             ['ECOS', 'OSQP']
+#             ECOS: https://www.embotech.com/ECOS
+#             OSQP: https://osqp.org/
+
+#         Returns
+#         -------
+#         selected_idx: list
+#             The selected indexes which is a subset of unlabel_index.
+#         """
+#         cvxpy = self._cvxpy
+#         assert (batch_size > 0)
+#         assert (isinstance(unlabel_index, collections.Iterable))
+#         assert (isinstance(label_index, collections.Iterable))
+#         unlabel_index = np.asarray(unlabel_index)
+#         label_index = np.asarray(label_index)
+#         if len(unlabel_index) <= batch_size:
+#             return unlabel_index
+
+#         KLL = self._K[np.ix_(label_index, label_index)]
+#         KLU = self._K[np.ix_(label_index, unlabel_index)]
+#         KUU = self._K[np.ix_(unlabel_index, unlabel_index)]
+
+#         L_len = len(label_index)
+#         U_len = len(unlabel_index)
+#         N = L_len + U_len
+
+#         # precision of ADMM
+#         MAX_ITER = 1000
+#         ABSTOL = 1e-4
+#         RELTOL = 1e-2
+
+#         # train a linear model in kernel form for
+#         tau = np.linalg.inv(KLL + self._gamma * np.eye(L_len)).dot(self.y[label_index])
+
+#         # start optimization
+#         last_round_selected = []
+#         iter_round = 0
+#         while 1:
+#             iter_round += 1
+#             # solve QP
+#             P = 0.5 * self._beta * KUU
+#             pred_of_unlab = tau.dot(KLU)
+#             a = pred_of_unlab * pred_of_unlab + 2 * np.abs(pred_of_unlab)
+#             q = self._beta * (
+#                     (U_len - batch_size) / N * np.ones(L_len).dot(KLU) - (L_len + batch_size) / N * np.ones(U_len).dot(
+#                 KUU)) + a
+
+#             # cvx
+#             x = cvxpy.Variable(U_len)
+
+#             # ignore P is not positive definite
+#             P_matrix = np.copy(P)
+#             P = psd_wrap(P)
+
+#             objective = cvxpy.Minimize(0.5 * cvxpy.quad_form(x, P) + q.T @ x)
+#             constraints = [0 <= x, x <= 1, sum(x) == batch_size]
+#             prob = cvxpy.Problem(objective, constraints)
+#             # The optimal objective value is returned by `prob.solve()`.
+#             # print(prob.is_qp())
+#             try:
+#                 result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS)
+#             except cvxpy.error.DCPError:
+#                 # cvx
+#                 x = cvxpy.Variable(U_len)
+#                 objective = cvxpy.Minimize(0.5 * cvxpy.quad_form(x, P) + q.T @ x)
+#                 constraints = [0 <= x, x <= 1]
+#                 prob = cvxpy.Problem(objective, constraints)
+#                 # The optimal objective value is returned by `prob.solve()`.
+#                 try:
+#                     result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS)
+#                 except cvxpy.error.DCPError:
+#                     result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS, gp=True)
+
+#             # Sometimes the constraints can not be satisfied,
+#             # thus we relax the constraints to get an approximate solution.
+#             if not (result != float('inf') and result != float('-inf')):
+#                 # cvx
+#                 x = cvxpy.Variable(U_len)
+#                 objective = cvxpy.Minimize(0.5 * cvxpy.quad_form(x, P) + q.T @ x)
+#                 constraints = [0 <= x, x <= 1]
+#                 prob = cvxpy.Problem(objective, constraints)
+#                 # The optimal objective value is returned by `prob.solve()`.
+#                 try:
+#                     result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS)
+#                 except cvxpy.error.DCPError:
+#                     result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS, gp=True)
+
+#             # The optimal value for x is stored in `x.value`.
+#             # print(x.value)
+#             dr_weight = np.array(x.value)
+#             if len(np.shape(dr_weight)) == 2:
+#                 dr_weight = dr_weight.T[0]
+#             # end cvx
+
+#             # record selected indexes and judge convergence
+#             dr_largest = nlargestarg(dr_weight, batch_size)
+#             select_ind = np.asarray(unlabel_index)[dr_largest]
+#             if set(last_round_selected) == set(select_ind) or iter_round > 15:
+#                 return select_ind
+#             else:
+#                 last_round_selected = copy.copy(select_ind)
+#             # print(dr_weight[dr_largest])
+
+#             # ADMM optimization process
+#             delta = np.zeros(batch_size)  # dual variable in ADMM
+#             KLQ = self._K[np.ix_(label_index, select_ind)]
+#             z = tau.dot(KLQ)
+
+#             for solver_iter in range(MAX_ITER):
+#                 # tau update
+#                 A = KLL.dot(KLL) + self._rho / 2 * KLQ.dot(KLQ.T) + self._gamma * KLL
+#                 r = self.y[label_index].dot(KLL) + 0.5 * delta.dot(KLQ.T) + self._rho / 2 * z.dot(KLQ.T)
+#                 tau = np.linalg.pinv(A).dot(r)
+
+#                 # z update
+#                 zold = z
+#                 v = (self._rho * tau.dot(KLQ) - delta) / (self._rho + 2)
+#                 ita = 2 / (self._rho + 2)
+#                 z_sign = np.sign(v)
+#                 z_sign[z_sign == 0] = 1
+#                 ztp = (np.abs(v) - ita * np.ones(len(v)))
+#                 ztp[ztp < 0] = 0
+#                 z = z_sign * ztp
+
+#                 # delta update
+#                 delta += self._rho * (z - tau.dot(KLQ))
+
+#                 # judge convergence
+#                 r_norm = np.linalg.norm((tau.dot(KLQ) - z))
+#                 s_norm = np.linalg.norm(-self._rho * (z - zold))
+#                 eps_pri = np.sqrt(batch_size) * ABSTOL + RELTOL * max(np.linalg.norm(z), np.linalg.norm(tau.dot(KLQ)))
+#                 eps_dual = np.sqrt(batch_size) * ABSTOL + RELTOL * np.linalg.norm(delta)
+#                 if r_norm < eps_pri and s_norm < eps_dual:
+#                     break
+
+# class QueryInstanceBMDR_original(BaseIndexQuery):
+#     """Discriminative and Representative Queries for Batch Mode Active Learning (BMDR)
+#     will query a batch of informative and representative examples by minimizing the ERM risk bound
+#     of active learning.
+
+#     This method needs to solve a quadratic programming problem for multiple times at one query which
+#     is time consuming in the relative large dataset (e.g., more than thousands of unlabeled examples).
+#     Note that, the solving speed is also influenced by kernel function. In our testing, the gaussian
+#     kernel takes more time to solve the problem.
+#     The QP solver is cvxpy here.
+
+#     The model used for instances selection is a linear regression model with the kernel form.
+
+#     Parameters
+#     ----------
+#     X: 2D array, optional (default=None)
+#         Feature matrix of the whole dataset. It is a reference which will not use additional memory.
+
+#     y: array-like, optional (default=None)
+#         Label matrix of the whole dataset. It is a reference which will not use additional memory.
+
+#     beta: float, optional (default=1000)
+#         The MMD parameter.
+
+#     gamma: float, optional (default=0.1)
+#         The l2-norm regularizer parameter.
+
+#     rho: float, optional (default=1)
+#         The parameter used in ADMM.
+
+#     kernel : {'linear', 'poly', 'rbf', callable}, optional (default='rbf')
+#         Specifies the kernel type to be used in the algorithm.
+#         It must be one of 'linear', 'poly', 'rbf', or a callable.
+#         If a callable is given it is used to pre-compute the kernel matrix
+#         from data matrices; that matrix should be an array of shape
+#         ``(n_samples, n_samples)``.
+
+#     degree : int, optional (default=3)
+#         Degree of the polynomial kernel function ('poly').
+#         Ignored by all other kernels.
+
+#     gamma_ker : float, optional (default=1.)
+#         Kernel coefficient for 'rbf', 'poly'.
+
+#     coef0 : float, optional (default=1.)
+#         Independent term in kernel function.
+#         It is only significant in 'poly'.
+
+#     References
+#     ----------
+#     [1] Wang, Z., and Ye, J. 2013. Querying discriminative and
+#         representative samples for batch mode active learning. In The
+#         19th ACM SIGKDD International Conference on Knowledge
+#         Discovery and Data Mining, 158-166.
+#     """
+
+#     def __init__(self, X, y, beta=1000, gamma=0.1, rho=1, **kwargs):
+#         try:
+#             import cvxpy
+#             self._cvxpy = cvxpy
+#         except:
+#             raise ImportError("This method need cvxpy to solve the QP problem."
+#                               "Please refer to https://www.cvxpy.org/install/index.html "
+#                               "install cvxpy manually before using.")
+
+#         # K: kernel matrix
+#         super(QueryInstanceBMDR, self).__init__(X, y)
+#         self.y = np.asarray(copy.deepcopy(y))   # fix # 33, avoid influencing the original y
+#         ul = unique_labels(self.y)
+#         if len(ul) != 2:
+#             raise ValueError(f"This query strategy is implemented for binary classification only, "
+#                              f"but {len(ul)} classes are detected.")
+#         if len(ul) == 2 and {1, -1} != set(ul):
+#             y_temp = np.array(copy.deepcopy(self.y))
+#             self.y[y_temp == ul[0]] = 1
+#             self.y[y_temp == ul[1]] = -1
+
+#         self._beta = beta
+#         self._gamma = gamma
+#         self._rho = rho
+
+#         # calc kernel
+#         self._kernel = kwargs.pop('kernel', 'rbf')
+#         if self._kernel == 'rbf':
+#             self._K = rbf_kernel(X=X, Y=X, gamma=kwargs.pop('gamma_ker', 1.))
+#         elif self._kernel == 'poly':
+#             self._K = polynomial_kernel(X=X,
+#                                         Y=X,
+#                                         coef0=kwargs.pop('coef0', 1),
+#                                         degree=kwargs.pop('degree', 3),
+#                                         gamma=kwargs.pop('gamma_ker', 1.))
+#         elif self._kernel == 'linear':
+#             self._K = linear_kernel(X=X, Y=X)
+#         elif hasattr(self._kernel, '__call__'):
+#             self._K = self._kernel(X=np.array(X), Y=np.array(X))
+#         else:
+#             raise NotImplementedError
+
+#         if not isinstance(self._K, np.ndarray):
+#             raise TypeError('K should be an ndarray')
+#         if self._K.shape != (len(X), len(X)):
+#             raise ValueError(
+#                 'kernel should have size (%d, %d)' % (len(X), len(X)))
+
+#     def __getstate__(self):
+#         pickle_seq = (
+#             self.X,
+#             self.y,
+#             self._beta,
+#             self._gamma,
+#             self._rho,
+#             self._kernel,
+#             self._K
+#         )
+#         return pickle_seq
+
+#     def __setstate__(self, state):
+#         self.X, self.y, self._beta, self._gamma, self._rho, self._kernel, self._K = state
+#         import cvxpy
+#         self._cvxpy = cvxpy
+
+#     def select(self, label_index, unlabel_index, batch_size=5, qp_solver='ECOS', **kwargs):
+#         """Select indexes from the unlabel_index for querying.
+
+#         Parameters
+#         ----------
+#         label_index: {list, np.ndarray, IndexCollection}
+#             The indexes of labeled samples.
+
+#         unlabel_index: {list, np.ndarray, IndexCollection}
+#             The indexes of unlabeled samples.
+
+#         batch_size: int, optional (default=1)
+#             Selection batch size.
+
+#         qp_solver: str, optional (default='ECOS')
+#             The solver in cvxpy to solve QP, must be one of
+#             ['ECOS', 'OSQP']
+#             ECOS: https://www.embotech.com/ECOS
+#             OSQP: https://osqp.org/
+
+#         Returns
+#         -------
+#         selected_idx: list
+#             The selected indexes which is a subset of unlabel_index.
+#         """
+#         cvxpy = self._cvxpy
+#         assert (batch_size > 0)
+#         assert (isinstance(unlabel_index, collections.Iterable))
+#         assert (isinstance(label_index, collections.Iterable))
+#         unlabel_index = np.asarray(unlabel_index)
+#         label_index = np.asarray(label_index)
+#         if len(unlabel_index) <= batch_size:
+#             return unlabel_index
+
+#         KLL = self._K[np.ix_(label_index, label_index)]
+#         KLU = self._K[np.ix_(label_index, unlabel_index)]
+#         KUU = self._K[np.ix_(unlabel_index, unlabel_index)]
+
+#         L_len = len(label_index)
+#         U_len = len(unlabel_index)
+#         N = L_len + U_len
+
+#         # precision of ADMM
+#         MAX_ITER = 1000
+#         ABSTOL = 1e-4
+#         RELTOL = 1e-2
+
+#         # train a linear model in kernel form for
+#         tau = np.linalg.inv(KLL + self._gamma * np.eye(L_len)).dot(self.y[label_index])
+
+#         # start optimization
+#         last_round_selected = []
+#         iter_round = 0
+#         while 1:
+#             iter_round += 1
+#             # solve QP
+#             P = 0.5 * self._beta * KUU
+#             pred_of_unlab = tau.dot(KLU)
+#             a = pred_of_unlab * pred_of_unlab + 2 * np.abs(pred_of_unlab)
+#             q = self._beta * (
+#                     (U_len - batch_size) / N * np.ones(L_len).dot(KLU) - (L_len + batch_size) / N * np.ones(U_len).dot(
+#                 KUU)) + a
+
+#             # cvx
+#             x = cvxpy.Variable(U_len)
+#             objective = cvxpy.Minimize(0.5 * cvxpy.quad_form(x, P) + q.T @ x)
+#             constraints = [0 <= x, x <= 1, sum(x) == batch_size]
+#             prob = cvxpy.Problem(objective, constraints)
+#             # The optimal objective value is returned by `prob.solve()`.
+#             # print(prob.is_qp())
+#             try:
+#                 result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS)
+#             except cvxpy.error.DCPError:
+#                 # cvx
+#                 x = cvxpy.Variable(U_len)
+#                 objective = cvxpy.Minimize(0.5 * cvxpy.quad_form(x, P) + q.T @ x)
+#                 constraints = [0 <= x, x <= 1]
+#                 prob = cvxpy.Problem(objective, constraints)
+#                 # The optimal objective value is returned by `prob.solve()`.
+#                 try:
+#                     result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS)
+#                 except cvxpy.error.DCPError:
+#                     result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS, gp=True)
+
+#             # Sometimes the constraints can not be satisfied,
+#             # thus we relax the constraints to get an approximate solution.
+#             if not (result != float('inf') and result != float('-inf')):
+#                 # cvx
+#                 x = cvxpy.Variable(U_len)
+#                 objective = cvxpy.Minimize(0.5 * cvxpy.quad_form(x, P) + q.T @ x)
+#                 constraints = [0 <= x, x <= 1]
+#                 prob = cvxpy.Problem(objective, constraints)
+#                 # The optimal objective value is returned by `prob.solve()`.
+#                 try:
+#                     result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS)
+#                 except cvxpy.error.DCPError:
+#                     result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS, gp=True)
+
+#             # The optimal value for x is stored in `x.value`.
+#             # print(x.value)
+#             dr_weight = np.array(x.value)
+#             if len(np.shape(dr_weight)) == 2:
+#                 dr_weight = dr_weight.T[0]
+#             # end cvx
+
+#             # record selected indexes and judge convergence
+#             dr_largest = nlargestarg(dr_weight, batch_size)
+#             select_ind = np.asarray(unlabel_index)[dr_largest]
+#             if set(last_round_selected) == set(select_ind) or iter_round > 15:
+#                 return select_ind
+#             else:
+#                 last_round_selected = copy.copy(select_ind)
+#             # print(dr_weight[dr_largest])
+
+#             # ADMM optimization process
+#             delta = np.zeros(batch_size)  # dual variable in ADMM
+#             KLQ = self._K[np.ix_(label_index, select_ind)]
+#             z = tau.dot(KLQ)
+
+#             for solver_iter in range(MAX_ITER):
+#                 # tau update
+#                 A = KLL.dot(KLL) + self._rho / 2 * KLQ.dot(KLQ.T) + self._gamma * KLL
+#                 r = self.y[label_index].dot(KLL) + 0.5 * delta.dot(KLQ.T) + self._rho / 2 * z.dot(KLQ.T)
+#                 tau = np.linalg.pinv(A).dot(r)
+
+#                 # z update
+#                 zold = z
+#                 v = (self._rho * tau.dot(KLQ) - delta) / (self._rho + 2)
+#                 ita = 2 / (self._rho + 2)
+#                 z_sign = np.sign(v)
+#                 z_sign[z_sign == 0] = 1
+#                 ztp = (np.abs(v) - ita * np.ones(len(v)))
+#                 ztp[ztp < 0] = 0
+#                 z = z_sign * ztp
+
+#                 # delta update
+#                 delta += self._rho * (z - tau.dot(KLQ))
+
+#                 # judge convergence
+#                 r_norm = np.linalg.norm((tau.dot(KLQ) - z))
+#                 s_norm = np.linalg.norm(-self._rho * (z - zold))
+#                 eps_pri = np.sqrt(batch_size) * ABSTOL + RELTOL * max(np.linalg.norm(z), np.linalg.norm(tau.dot(KLQ)))
+#                 eps_dual = np.sqrt(batch_size) * ABSTOL + RELTOL * np.linalg.norm(delta)
+#                 if r_norm < eps_pri and s_norm < eps_dual:
+#                     break
 
 
 class QueryInstanceSPAL(BaseIndexQuery):
@@ -1602,18 +1894,6 @@ class QueryInstanceSPAL(BaseIndexQuery):
             # The optimal objective value is returned by `prob.solve()`.
             # result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS)
             try:
-                prob_is_qp = prob.is_qp()
-                assert prob_is_qp == True
-            except:
-                P_is_psd = np.all(np.linalg.eigvals(P) > 0)
-                if P_is_psd == True:
-                    P = cvxpy.atoms.affine.wraps.psd_wrap(P)
-                    objective = cvxpy.Minimize(0.5 * cvxpy.quad_form(x, P) + q.T @ x)
-                    prob = cvxpy.Problem(objective, constraints)
-                else:
-                    assert False, "P is not psd matrix!"
-
-            try:
                 result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS)
             except cvxpy.error.DCPError:
                 result = prob.solve(solver=cvxpy.OSQP if qp_solver == 'OSQP' else cvxpy.ECOS, gp=True)
@@ -1771,11 +2051,9 @@ class QueryInstanceLAL(BaseIndexQuery):
         self._mode = mode
         self._selector = None
         self.model = RandomForestClassifier(n_estimators=cls_est, oob_score=True, n_jobs=8)
-        if train_slt == True:
+        if train_slt:
             self.download_data()
             self.train_selector_from_file()
-        elif train_slt:
-            self.load_selector_from_file(train_slt)
 
     def download_data(self):
         iter_url = 'https://raw.githubusercontent.com/ksenia-konyushkova/LAL/master/lal%20datasets/LAL-iterativetree-simulatedunbalanced-big.npz'
@@ -1862,13 +2140,6 @@ class QueryInstanceLAL(BaseIndexQuery):
         print('Done!')
         print('Oob score = ', lalModel1.oob_score_)
         self._selector = lalModel1
-
-    def load_selector_from_file(self, file_path):
-        from joblib import dump, load
-        print("Load file")
-        lalModel1 = load(file_path)
-        self._selector = lalModel1
-        print("Done!")
 
     def select(self, label_index, unlabel_index, batch_size=1, **kwargs):
         if self._selector is None:
