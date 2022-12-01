@@ -1308,12 +1308,11 @@ class QueryInstanceBMDR(BaseIndexQuery):
         # print(self.max_min_eigs)
         eps = 1e-15
         while (np.min(lambdas) < 0) and (eps <= 1e-3):
-            eps = np.min(lambdas)
-            eps = eps.real + 1e-15
             n = self._K.shape[0]
             self._K = self._K + eps*np.eye(n)
             lambdas = np.linalg.eigvals(self._K)
             self.max_min_eigs.append((np.max(lambdas), np.min(lambdas)))
+            eps = eps*10
             # print(self.max_min_eigs)
 
     def __getstate__(self):
@@ -1603,12 +1602,11 @@ class QueryInstanceSPAL(BaseIndexQuery):
         # print(self.max_min_eigs)
         eps = 1e-15
         while (np.min(lambdas) < 0) and (eps <= 1e-3):
-            eps = np.min(lambdas)
-            eps = eps.real + 1e-15
             n = self._K.shape[0]
             self._K = self._K + eps*np.eye(n)
             lambdas = np.linalg.eigvals(self._K)
             self.max_min_eigs.append((np.max(lambdas), np.min(lambdas)))
+            eps = eps*10
             # print(self.max_min_eigs)
 
     def __getstate__(self):
